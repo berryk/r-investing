@@ -1,0 +1,517 @@
+---
+title: "Live portfolio"
+output: html_document
+---
+
+This document shows the results of the current live portfolio. 
+
+## Current strategy
+
+Think of portfolio as 3 different funds
+
+Retirement: IRA + Defferred Comp + 401K = Bonds
+MCO Stock: Stock
+Liquid Stock: Regular portfolio
+
+Will over time go back to optimizing whole portfolio.
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE)
+library(knitr)
+```
+
+```{r, echo=FALSE, results="hide"}
+
+#devtools::install_github("joshuaulrich/quantmod", ref="157_yahoo_502")
+#remotes::install_github("joshuaulrich/quantmod", ref="157_yahoo_502")
+
+#setInternet2(TRUE)
+con = gzcon(url('https://github.com/systematicinvestor/SIT/raw/master/sit.gz', 'rb'))
+source(con)
+close(con)
+
+load.packages('quantmod')   
+
+tickers = spl('
+              TLT = TLT + VUSTX,
+#              TLT = BLV + VBLTX,
+             BLV = BLV + VBLTX,
+              GLD = GLD + GOLD,
+#              GLD = GLD,
+              SPY = SPY + VFINX,
+#              SHY = SHY + VFISX,
+              SHY = VFISX,
+              VEU = VEU + FDIVX,
+              MCO
+              ')
+
+ tickers1 = spl('
+               TLT,
+               VUSTX,
+               BLV,
+               VBLTX,
+               GLD,
+               SPY,
+               VFINX,
+               SHY,
+               VFISX,
+               VEU,
+               FDIVX,
+               MCO
+               ')
+ 
+ # Use external data
+raw <- new.env()
+
+
+getSymbols.extra(tickers1, src='yahoo', from = '1970-01-01', env = raw, set.symbolnames = T, auto.assign = T)
+for(i in raw$symbolnames) raw[[i]] = adjustOHLC(raw[[i]], use.Adjusted = FALSE, symbol.name=i)
+raw$GOLD = bundes.bank.data.gold()
+
+# How to make BLV replace TLT as of 1st March?
+# What if we use TLT as the signal, but trade BLV?
+
+equities.2 = spl("SPY,VEU")
+
+data <- new.env()
+
+#getSymbols(tickers1, src='yahoo', from = '1970-01-01', env = data)
+getSymbols.extra(tickers, src = 'yahoo', from = '1970-01-01', env = data, set.symbolnames = T,raw.data = raw, auto.assign = T)
+#getSymbols.extra(tickers, src = 'google', from = '1970-01-01', env = data, set.symbolnames = T,raw.data = raw.data, auto.assign = T)
+#for(i in data$symbolnames) data[[i]] = adjustOHLC(data[[i]], use.Adjusted=T)
+#for(i in data$symbolnames) data[[i]] = adjustOHLC(data[[i]], use.Adjusted = FALSE, symbol.name=i)
+
+
+bt.prep(data, align='remove.na')
+
+
+#*****************************************************************
+# Setup
+#****************************************************************** 		
+prices = data$prices   
+n = ncol(prices)
+nperiods = nrow(prices)
+
+#period.ends = endpoints(prices, 'quarters')
+period.ends = endpoints(prices, 'months')
+#period.ends = endpoints(prices, 'days')
+period.ends = period.ends[period.ends > 0]		
+period.ends = c(1, period.ends)
+
+
+
+models = list()
+
+
+# SPY Buy and Hold
+data$weight[] = NA
+data$weight$SHY=0
+data$weight$SPY=1
+data$weight$TLT=0
+data$weight$GLD=0
+data$weight$MCO=0
+data$weight$BLV=0
+
+
+models$spy.bh = bt.run.share(data, trade.summary=T, clean.signal=F)
+
+# Equal Weight
+data$weight[] = NA
+data$weight$SHY=0
+data$weight$MCO=0
+data$weight$SPY=1/3
+data$weight$TLT=1/3
+data$weight$GLD=1/3
+data$weight$BLV=0
+
+models$equal.weight = bt.run.share(data, trade.summary=T, clean.signal=F)
+
+# Target asset volatility
+
+max.leverage = 4
+
+ret = bt.apply.matrix(prices, ROC, type='discrete')
+abs.ret = abs(ret)
+abs.ret.average = bt.apply.matrix(abs.ret, SMA, 30)
+#abs.ret.average = bt.apply.matrix(abs.ret, SMA, 60)
+
+leverage = 1/(abs.ret.average^2)
+
+days = 252
+sma = bt.apply.matrix(prices, SMA, days )
+annual.ret = prices/mlag(prices,days )
+annual.ret.lev = annual.ret * leverage
+absmom = annual.ret - c(coredata(annual.ret$SHY))
+
+
+leverage$SHY = 0
+positions = (((prices > sma)*0.5)+ ((absmom >0) * 0.5))
+
+price.div.sma = prices/sma
+
+
+# 
+positions$SHY = 0
+positions$MCO = 0
+
+# Positions BLV before 1st March 2017 = 0
+# Positions TLT after 1st March 2017 = 0
+positions$BLV["/2017-03-01"] = 0
+positions$TLT["2017-03-01/"] = 0 
+
+
+
+
+top.assets = ntop(annual.ret[,equities.2],1) 
+
+positions$VEU = 0
+
+portfolio.weight = positions*leverage
+#portfolio.weight[,equities.2]=portfolio.weight[,equities.2]*top.assets
+
+max.weight = max(rowSums(portfolio.weight[period.ends,]),na.rm=TRUE)
+
+
+
+
+overall.leverage = 9/max.weight
+#overall.leverage = 5/max.weight
+
+portfolio.weight = portfolio.weight * drop(overall.leverage)
+
+lev.cap = iif(rowSums(portfolio.weight)>max.leverage, max.leverage/rowSums(portfolio.weight), 1)
+
+portfolio.weight = portfolio.weight * lev.cap
+
+data$weight[] = NA
+data$weight[period.ends,] = portfolio.weight[period.ends,]
+models$equalassetvol.equalportvol.pos = bt.run.share(data, trade.summary=T, clean.signal=F)
+
+#Calculate the rolling 12 month positive returns
+models$equalassetvol.equalportvol.pos$equity=models$equalassetvol.equalportvol.pos$equity["1995-11-30/"]
+twelve.ret = ROC(models$equalassetvol.equalportvol.pos$equity,252,type="discrete")
+rolling.rets = (sum(twelve.ret > 0,na.rm=TRUE)/(sum(twelve.ret > 0,na.rm=TRUE)+sum(twelve.ret < 0,na.rm=TRUE)))*100
+
+```
+
+## SMA
+
+```{r, echo=FALSE}
+#kable(tail(price.div.sma,10))
+kable(tail(data.frame(Date=index(price.div.sma), coredata(price.div.sma)),10), format.args = list(big.mark = ","))
+```
+
+## ABSMom
+
+```{r, echo=FALSE}
+#kable(tail(absmom,10))
+kable(tail(data.frame(Date=index(absmom), coredata(absmom)),10), format.args = list(big.mark = ","))
+```
+
+## Volatility 
+
+```{r, echo=FALSE}
+kable(tail(data.frame(Date=index(abs.ret.average[period.ends,]), coredata(abs.ret.average[period.ends,])),10), format.args = list(big.mark = ","))
+```
+
+## Trades
+
+```{r, echo=FALSE}
+kable(tail(models$equalassetvol.equalportvol.pos$trade.summary$trades,10))
+```
+
+## Ideal portfolio weights
+
+```{r, echo=FALSE}
+
+kable(tail(data.frame(Date=index(portfolio.weight[period.ends,]), coredata(portfolio.weight[period.ends,])),10))
+```
+
+
+## Transition map 
+
+```{r, echo=FALSE}
+plotbt.transition.map(models$equalassetvol.equalportvol.pos$weight)
+```
+
+## System details
+
+```{r, echo=FALSE}
+model.detail = list()
+
+model.detail = bt.detail.summary(models$equalassetvol.equalportvol.pos)
+model.detail$System$Roll.TwelveM = (sum(twelve.ret > 0,na.rm=TRUE)/(sum(twelve.ret > 0,na.rm=TRUE)+sum(twelve.ret < 0,na.rm=TRUE)))*100
+kable(list2matrix(model.detail))
+max.drawdown = compute.max.drawdown(models$equalassetvol.equalportvol.pos$equity)
+```
+
+
+
+## Monthly performance
+
+```{r, echo=FALSE, results="hide"}
+plotbt.monthly.table(models$equalassetvol.equalportvol.pos$equity)
+```
+
+## Weights
+
+```{r, echo=FALSE}
+kable(last(models$equalassetvol.equalportvol.pos$weight))
+```
+
+
+```{r, echo=FALSE, results="hide"}
+
+TradesFile = read.csv("../Trades.csv", stringsAsFactors=FALSE, header=F)
+
+
+# Build a structure of accounts
+# Load each data column into it's account
+
+accounts=list()
+
+
+#Create a data frame with the Trade Dates, column name date
+TradeDates = TradesFile[1][c(-1,-2),]
+
+for(i in 2:ncol(TradesFile)){
+  
+  column.name = TradesFile[2,i]
+  account.name = TradesFile[1,i]
+  if(account.name %in% names(accounts)){
+    
+    accounts[[account.name]][[column.name]]=as.numeric(TradesFile[i][c(-1,-2),])
+  } else {
+    
+    accounts[[account.name]]=list()
+    accounts[[account.name]][["date"]]=TradeDates
+    accounts[[account.name]][[column.name]]=as.numeric(TradesFile[i][c(-1,-2),])
+  }
+}
+
+# Tax the Restricted Units
+accounts$`Restriced Units`$MCO = accounts$`Restriced Units`$MCO * 0.6
+
+# Calculate the volatility of MCO
+
+mco = prices$MCO
+mco.ret = bt.apply.matrix(mco, ROC, type='discrete')
+mco.abs.ret = abs(mco.ret)
+mco.ret.average = bt.apply.matrix(mco.abs.ret, SMA, 60)
+mco.vol = mco.ret.average/abs.ret.average$SPY
+
+prices$Cash = 1
+prices$SPYX = prices$SPY*(94.410/237.81)
+
+framify <- function(x){ 
+  dd = as.data.frame(matrix(unlist(x), nrow=length(unlist(x[1]))))
+  colnames(dd)=names(x)
+  return (dd)
+}
+
+accounts.dfs = lapply(accounts, framify)
+
+last.prices = last(prices)
+# Now make the dataframes into xts objects
+# accounts.xts = lapply(accounts.dfs, function(x){xts(x,order.by=index(last.prices))})
+account.dates = as.Date(accounts.dfs$FolioFn$date,format="%m/%d/%Y")
+accounts.xts = lapply(accounts.dfs, function(x){xts(x,order.by=account.dates)})
+
+prices$dummy = 1
+account.prices = prices[paste((min(account.dates)),"/")]
+
+
+value.accounts = function(x){
+  nm=names(x[,-1])
+  x =merge(account.prices$dummy,x)
+  x = na.locf(x)
+  x=x[,nm]
+  values = account.prices[,nm]*x
+  values$dummy = 0
+  values$sum = rowSums(values)
+  return(values)
+}
+
+accounts.value = lapply(accounts.xts,value.accounts)
+
+
+account.names = names(accounts.value)
+account.summary = accounts.value[[1]]$sum
+
+for(i in 2:length(accounts.value)){
+   account.summary = cbind(account.summary,accounts.value[[i]]$sum)
+}
+
+names(account.summary)=account.names
+account.summary$networth = rowSums(account.summary)
+
+tail(account.summary)
+```
+
+### Networth monthly 
+
+```{r, echo=FALSE, results="hide"}
+plotbt.monthly.table(account.summary$networth)
+#plot(account.summary$networth)
+```
+
+```{r, echo=FALSE, results="hide"}
+# Need to calculate the amount of equities, gold and bonds to work out the trades
+
+
+
+
+# 
+# account.summary = prices$dummy
+# 
+# summarize.accounts<-function(x){
+#   account.summary= merge(account.summary,x$sum)
+# }
+# 
+# accounts.value = lapply(accounts.value,summarize.accounts)
+# 
+# 
+# 
+# # 
+# # accounts.value = lapply(accounts.xts, function(x){(x*last.prices)} )
+# 
+# # Get the last weights and exposures
+# 
+last.portfolio.weights =last(models$equalassetvol.equalportvol.pos$weight)
+current.mco.vol = last(mco.vol)
+last.accounts.value = last(account.summary)
+# 
+
+liquid.funds = last.accounts.value$IB
+min.liquid.funds = 1000000
+
+#max.exposure = (liquid.funds - min.liquid.funds)/abs(max.drawdown)
+
+max.exposure = liquid.funds
+
+ trade.values = list()
+ trade.values$TLT = last.portfolio.weights$TLT*max.exposure
+ trade.values$BLV = last.portfolio.weights$BLV*max.exposure
+ trade.values$GLD = last.portfolio.weights$GLD*max.exposure
+ trade.values$SPY = last.portfolio.weights$SPY*max.exposure
+ trade.values$VEU = last.portfolio.weights$VEU*max.exposure
+
+# 
+ shares = list()
+ shares$TLT = as.integer(last(accounts.xts$IB$TLT)) 
+ shares$BLV = as.integer(last(accounts.xts$IB$BLV)) 
+ shares$GLD = as.integer(last(accounts.xts$IB$GLD))
+ shares$SPY = as.integer(last(accounts.xts$IB$SPY))
+ shares$VEU = as.integer(last(accounts.xts$IB$VEU))
+ 
+#Current exposures - total exposures to bonds, equities and gold
+ current.exposure = list()
+ current.exposure$TLT = shares$TLT*last(prices$TLT)
+ current.exposure$BLV = shares$BLV*last(prices$BLV)
+ current.exposure$GLD = shares$GLD*last(prices$GLD)
+ current.exposure$SPY = shares$SPY*last(prices$SPY)
+ current.exposure$VEU = shares$VEU*last(prices$VEU)
+ 
+next.portfolio.weights =last(portfolio.weight[period.ends,])
+
+#Target Exposures 
+target.exposure=list()
+target.exposure$TLT = next.portfolio.weights$TLT*max.exposure
+target.exposure$BLV = next.portfolio.weights$BLV*max.exposure
+target.exposure$GLD = next.portfolio.weights$GLD*max.exposure
+target.exposure$SPY = next.portfolio.weights$SPY*max.exposure
+target.exposure$VEU = next.portfolio.weights$VEU*max.exposure
+
+#Target IB Exposures 
+next.trade.values=list()
+next.trade.values$TLT = next.portfolio.weights$TLT*max.exposure
+next.trade.values$BLV = next.portfolio.weights$BLV*max.exposure
+next.trade.values$GLD = next.portfolio.weights$GLD*max.exposure
+next.trade.values$SPY = next.portfolio.weights$SPY*max.exposure
+next.trade.values$VEU = next.portfolio.weights$VEU*max.exposure
+
+#Target shares
+next.shares = list()
+next.shares$TLT = as.integer(next.trade.values$TLT/last(prices$TLT))
+next.shares$BLV = as.integer(next.trade.values$BLV/last(prices$BLV))
+next.shares$GLD = as.integer(next.trade.values$GLD/last(prices$GLD))
+next.shares$SPY = as.integer(next.trade.values$SPY/last(prices$SPY))
+next.shares$VEU = as.integer(next.trade.values$VEU/last(prices$VEU))
+
+# Trade to make 
+
+next.trade = list()
+next.trade$TLT = next.shares$TLT - as.integer(last(accounts.xts$IB$TLT)) 
+next.trade$BLV = next.shares$BLV - as.integer(last(accounts.xts$IB$BLV)) 
+next.trade$GLD = next.shares$GLD - as.integer(last(accounts.xts$IB$GLD))
+next.trade$SPY = next.shares$SPY - as.integer(last(accounts.xts$IB$SPY))
+next.trade$VEU = next.shares$VEU - as.integer(last(accounts.xts$IB$VEU))
+```
+
+Given liquid equity of `r as.integer(liquid.funds)` a maximum exposure of `r as.integer(max.exposure)` is recommended. 
+
+## Porfolio Weights
+
+```{r, echo=FALSE}
+kable(tail(models$equalassetvol.equalportvol.pos$weight,10))
+```
+
+## Current Overall Exposures
+
+```{r, echo=FALSE}
+expmat = list2matrix(current.exposure)
+colnames(expmat) = "Exposure" 
+kable(expmat, format.args = list(big.mark = ","))
+```
+
+## Target Overall Exposures (1st Month)
+
+```{r, echo=FALSE}
+expmat = list2matrix(target.exposure)
+colnames(expmat) = "Exposure" 
+kable(expmat, format.args = list(big.mark = ","))
+```
+
+## Current Ideal IB Exposures
+
+```{r, echo=FALSE}
+expmat = list2matrix(trade.values)
+colnames(expmat) = "Exposure" 
+kable(expmat, format.args = list(big.mark = ","))
+```
+
+## Target IB Exposures (1st Month)
+```{r, echo=FALSE}
+expmat = list2matrix(next.trade.values)
+colnames(expmat) = "Exposure" 
+kable(expmat, format.args = list(big.mark = ","))
+```
+
+## Current IB Shares
+
+```{r, echo=FALSE}
+sharesmat = list2matrix(shares)
+colnames(sharesmat) = "Shares" 
+kable(sharesmat, format.args = list(big.mark = ","))
+```
+
+## Target IB Shares (1st Month)
+```{r, echo=FALSE}
+sharesmat = list2matrix(next.shares)
+colnames(sharesmat) = "Shares" 
+kable(sharesmat, format.args = list(big.mark = ","))
+```
+
+## Next trade to make to rebalance (1st Month)
+
+```{r, echo=FALSE}
+trademat = list2matrix(next.trade)
+colnames(trademat ) = "Shares" 
+kable(trademat, format.args = list(big.mark = ","))
+```
+
+## Change in networth
+
+```{r, echo=FALSE}
+kable(tail(data.frame(Date=index(account.summary), coredata(account.summary)),2),digits = 0, format.args = list(big.mark = ","))
+```
